@@ -1,44 +1,66 @@
-import base64
-from LoraPacket import LoraPacket
-from crypto import loramac_decrypt
-from mic import calculateMIC, verifyMIC
+import sqlite3
+import serial
+from LoraPacketPython.LoraPacketPython.main import decode
+from MSG import MSG
+from SQL import SQL
+from SerialPorts import SerialPorts
 
+# DevAddr test
+DevAddr_test = '260B02AF'
+FPort = ' 15'
 
-def decode(b64_data: str, nwkKey: str, appKey: str):
-    input_buffer = base64.b64decode(b64_data)
-    appKey = bytes.fromhex(appKey)
-    nwkKey = bytes.fromhex(nwkKey)
+def main_func(conn: sqlite3, ser: serial, DevAddr: str, payload: str):
+    cur = conn.cursor()
+    sql_command = '''SELECT * FROM device WHERE DevAddr = ? '''
 
-    packet = LoraPacket(input_buffer)
-    print(packet.__str__())
+    # SQLite rows DevAddr, NwkKey, AppKey
+    res = cur.execute(sql_command, (DevAddr,)).fetchone()
 
-    micOk = (
-        " (OK)"
-        if verifyMIC(packet, nwkKey)
-        else " (BAD != " + calculateMIC(packet, nwkKey).hex() + ")"
-    )
+    if res:
+        if res[1] == None and res[2] == None:
+            size_text = len(payload)
+            msg_CSTDN = MSG.cstdn_msg(payload, 0, size_text, 0)
+            MSG.send_msg(msg_CSTDN, ser)
 
-    print(f"        MIC State: {micOk}")
+        if res[1] != None and res[2] != None:
+            mickOk, plainText, FCnt = decode(payload, res[2], res[1])
 
-    decipher_key = bytes(nwkKey if packet.getFPort() == 0 else appKey)
+            # print("FCnt: " + str(FCnt))
+            
+            if mickOk == " (OK)":
+                plainText = plainText.decode("utf-8")
+                # update BD
+                # Coordinates and battery using the plaintext
+                coordinates = plainText
+                battery = 100
 
-    plain_buffer = bytearray(
-        loramac_decrypt(
-            packet.FRMPayload.hex(),
-            packet.getFCnt(),
-            decipher_key.hex(),
-            packet.DevAddr.hex(),
-        )
-    )
+                sql_command = '''SELECT DevAddr FROM buoyStatus WHERE DevAddr = ? '''
+                res = cur.execute(sql_command, (DevAddr,)).fetchone()
+                if res:
+                    SQL.update_buoyStatus(conn, DevAddr, coordinates, battery)
+                else:
+                    SQL.insert_table_buoy(conn, DevAddr, coordinates, battery)
 
-    plain_text = plain_buffer.decode("utf-8")
-
-    print(f"        Decoded payload: {plain_text}")
-
+                msg_CMESH = MSG.cmesh_msg(plainText)
+                size_text = len(plainText)
+                MSG.send_msg(msg_CMESH, ser)
+                
+                msg_CSTDN = MSG.cstdn_msg(payload, FPort, size_text, 0)
+                MSG.send_msg(msg_CSTDN, ser)
+    
+    cur.close()
 
 if __name__ == "__main__":
-    DATA = "QK8CCyYAAQACngFTe003RTA="
-    NWK_KEY = "87F1802E0C803DEB919F93814596345E"
-    APP_KEY = "067469A70DFFF46C84ED6756DB5FFDFB"
+    conn = SQL.create_connection('ex1.db')
+    ser = SerialPorts.open_serial()
+    main_func(conn, ser, DevAddr_test, 'QK8CCyYAAQACngFTe003RTA=')
 
-    decode(DATA, NWK_KEY, APP_KEY)
+
+
+
+
+
+
+
+
+
